@@ -1,13 +1,14 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 import re
-from PyQt6.Qsci import QsciScintilla, QsciAPIs
+from PyQt6.Qsci import QsciScintilla
 from PyQt6.QtCore import Qt, QRect, QPoint, QTimer, QRectF
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QShortcut, QKeySequence, QAction, QPainter, QPen, QBrush
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QShortcut, QKeySequence, QAction, QPainter, QPen, QBrush, QKeyEvent
 from PyQt6.QtWidgets import QMenu, QLineEdit, QCheckBox, QPushButton, QLabel, QMessageBox, QDialog, QVBoxLayout, \
     QHBoxLayout, QColorDialog, QToolTip
 from . import Lexers
 from . import Modules as ModuleFile
+from .autocomplete_engine import PythonAutocompleteEngine
 
 if TYPE_CHECKING:
     from .window import Window
@@ -78,13 +79,15 @@ class CodeEditor(QsciScintilla):
     def __init__(self, window: Window):
         super().__init__(parent=None)
 
+        self._themes = window._themes
         lexer = Lexers.PythonLexer(window)
         self.setLexer(lexer)
         self.setPaper(QColor(window._themes["editor_theme"]))
+        self.autocomplete_engine = PythonAutocompleteEngine(self)
+        self.autocomplete_engine.refresh()
 
         # Autocompletion
-        apis = QsciAPIs(self.lexer())
-        self.setAutoCompletionSource(QsciScintilla.AutoCompletionSource.AcsAll)
+        self.setAutoCompletionSource(QsciScintilla.AutoCompletionSource.AcsAPIs)
         self.setAutoCompletionThreshold(1)
         self.setAutoCompletionCaseSensitivity(True)
         self.setWrapMode(QsciScintilla.WrapMode.WrapNone)
@@ -92,6 +95,7 @@ class CodeEditor(QsciScintilla):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setAutoCompletionThreshold(1)
         self.setAutoCompletionFillupsEnabled(True)
+        self._configure_autocomplete_popup_style()
 
         # Setting up lexers
         lexer.setPaper(QColor(window._themes["editor_theme"]))
@@ -102,7 +106,7 @@ class CodeEditor(QsciScintilla):
         lexer.setColor(QColor("#59ff00"), lexer.TripleDoubleQuotedString)
         lexer.setColor(QColor("#3ba800"), lexer.SingleQuotedString)
         lexer.setColor(QColor("#3ba800"), lexer.DoubleQuotedString)
-        lexer.setColor(QColor(window._themes["editor_fg"]), lexer.Default)
+        lexer.setColor(QColor("#FFFFFF"), lexer.Default)
         lexer.setFont(QFont(window._themes["font"]))
 
         self.setTabWidth(4)
@@ -157,6 +161,73 @@ class CodeEditor(QsciScintilla):
         
         # Initial scan for colors
         QTimer.singleShot(100, self.update_color_previews)
+
+    def _rgb_to_scintilla_color(self, color: QColor) -> int:
+        return (color.blue() << 16) | (color.green() << 8) | color.red()
+
+    def _configure_autocomplete_popup_style(self):
+        editor_bg = QColor(self._themes.get("editor_theme", "#1e1e1e"))
+        editor_fg = QColor(self._themes.get("editor_fg", "#d4d4d4"))
+        popup_bg = editor_bg.darker(108)
+        popup_fg = editor_fg
+        selected_bg = QColor("#094771")
+        selected_fg = QColor("#ffffff")
+        highlight_fg = QColor("#4fc1ff")
+
+        scintilla_type = type(self)
+        autoc_commands = [
+            ("SCI_AUTOCSETBACK", (self._rgb_to_scintilla_color(popup_bg),)),
+            ("SCI_AUTOCSETFORE", (self._rgb_to_scintilla_color(popup_fg),)),
+            ("SCI_AUTOCSETSELBACK", (1, self._rgb_to_scintilla_color(selected_bg))),
+            ("SCI_AUTOCSETSELFORE", (1, self._rgb_to_scintilla_color(selected_fg))),
+            ("SCI_AUTOCSETHLFORE", (self._rgb_to_scintilla_color(highlight_fg),)),
+            ("SCI_AUTOCSETHLBACK", (self._rgb_to_scintilla_color(selected_bg),)),
+            ("SCI_AUTOCSETMAXHEIGHT", (10,)),
+            ("SCI_AUTOCSETMAXWIDTH", (48,)),
+        ]
+
+        for command_name, args in autoc_commands:
+            command_id = getattr(scintilla_type, command_name, None)
+            if command_id is None:
+                continue
+            self.SendScintilla(command_id, *args)
+
+    def setLexer(self, lexer):
+        super().setLexer(lexer)
+        if hasattr(self, "autocomplete_engine"):
+            self.autocomplete_engine.refresh()
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key.Key_Space and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.autocomplete_engine.trigger(force=True)
+            return
+
+        key = event.key()
+        navigation_keys = {
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_PageUp,
+            Qt.Key.Key_PageDown,
+            Qt.Key.Key_Home,
+            Qt.Key.Key_End,
+            Qt.Key.Key_Escape,
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+            Qt.Key.Key_Tab,
+            Qt.Key.Key_Backtab,
+        }
+
+        if key in navigation_keys:
+            super().keyPressEvent(event)
+            return
+
+        super().keyPressEvent(event)
+        self.autocomplete_engine.trigger()
+
+    def show_autocompletion(self):
+        self.autocomplete_engine.trigger(force=True)
 
     def show_context_menu(self, point):
         self.context_menu.popup(self.mapToGlobal(point))

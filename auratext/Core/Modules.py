@@ -3,7 +3,7 @@ import os
 import random
 from tkinter import messagebox, filedialog
 import markdown
-
+import sys
 import pyttsx3
 import requests
 import pyperclip
@@ -229,8 +229,6 @@ def markdown_new(self):
     self.md_widget = QTextBrowser()
     self.md_widget.setOpenExternalLinks(True)
     self.md_widget.setStyleSheet("background-color: #0d1117;")
-    self.md_layout = QVBoxLayout(self.md_widget)
-    self.md_layout.addWidget(self.md_widget)
     self.mdnew.setWidget(self.md_widget)
     self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.mdnew)
 
@@ -256,8 +254,6 @@ def markdown_open(self, path_data, file_path=None):
         if file_path:
             self.md_widget.setSearchPaths([os.path.dirname(file_path)])
 
-        self.md_layout = QVBoxLayout(self.md_widget)
-        self.md_layout.addWidget(self.md_widget)
         self.md_dock.setWidget(self.md_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.md_dock)
 
@@ -320,17 +316,41 @@ def summary(self):
     messagebox.showinfo("Summary", text)
 
 
-def save_document(self):
+def save_document(self, force_dialog=False):
     try:
-        # a = self.tab_widget.
-        name = str(filedialog.asksaveasfilename(title="Select file", defaultextension=".py"))
-        file = open(name, "w")
+        active_tab_index = self.tab_widget.currentIndex()
+        if active_tab_index < 0:
+            return
+
+        existing_path = self.tab_file_paths.get(active_tab_index, "") if hasattr(self, "tab_file_paths") else ""
+        current_tab_name = str(self.tab_widget.tabText(active_tab_index)).strip()
+
+        if force_dialog or not existing_path:
+            suggested_name = os.path.basename(existing_path) if existing_path else os.path.basename(current_tab_name)
+            if not suggested_name:
+                suggested_name = "untitled.py"
+            name = str(
+                filedialog.asksaveasfilename(
+                    title="Select file",
+                    defaultextension=".py",
+                    initialfile=suggested_name,
+                )
+            )
+            if not name:
+                return
+        else:
+            name = existing_path
+
+        file = open(name, "w", encoding="utf-8", errors="ignore")
         text = self.current_editor.text()
         file.write(text)
         title = os.path.basename(file.name) + "   ~ Aura Text"
-        active_tab_index = self.tab_widget.currentIndex()
         self.tab_widget.setTabText(active_tab_index, os.path.basename(file.name))
         self.setWindowTitle(title)
+        if hasattr(self, "tab_file_paths"):
+            self.tab_file_paths[active_tab_index] = name
+        if hasattr(self, "update_run_button_visibility"):
+            self.update_run_button_visibility()
         file.close()
         return
     except FileNotFoundError:
@@ -358,6 +378,16 @@ def open_document(self):
     image_extensions = ["png", "jpg", "jpeg", "ico", "gif", "bmp"]
 
     if file_dir:
+        if ext == "pdf":
+            opened = False
+            if hasattr(self, "open_pdf_in_app"):
+                opened = bool(self.open_pdf_in_app(file_dir))
+            pdf_handler = getattr(self, "_latex_pdf_open_handler", None)
+            if callable(pdf_handler):
+                pdf_handler(file_dir)
+            if opened or callable(pdf_handler):
+                return
+
         try:
             if ext in image_extensions:
                 add_image_tab(self, self.tab_widget, file_dir, os.path.basename(file_dir))

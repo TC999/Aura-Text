@@ -34,3 +34,7 @@ def run_pyinstaller():
 
 if __name__ == '__main__':
     run_pyinstaller()
+
+	
+
+	

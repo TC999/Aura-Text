@@ -1,3 +1,8 @@
+"""
+A custom status bar for the AuraText editor, displaying line/column info, total lines, word count, and current language mode.
+"""
+
+
 import json
 import os
 import time
@@ -57,10 +62,22 @@ class StatusBar(QStatusBar):
         smallFont = QFont()
         smallFont.setPointSize(8)
 
+        # Always initialize editModeLabel first
+        self.editModeLabel = QLabel("ReadOnly")
+        self.editModeLabel.setFont(smallFont)
+        self.editModeLabel.setStyleSheet(
+            f"""
+            color: {{"#FFFFFF;"}};
+            font-weight: bold;
+            margin-bottom: 5px;
+            """
+        )
+
         if greeting:
             self.greetingLabel = QLabel(greeting)
             self.greetingLabel.setFont(smallFont)
             self.addWidget(self.greetingLabel)
+
 
         self.lineLabel = QLabel("▼ Line:")
         self.lineValueLabel = QLabel("0")
@@ -131,7 +148,11 @@ class StatusBar(QStatusBar):
         rightLayout.addWidget(self.languageButton)
         rightLayout.addWidget(Separator())
 
+        # ...existing code...
+
         self.addPermanentWidget(rightWidget)
+        # ...existing code...
+        # Optionally emit signal or call parent to update editor tab length
 
 
         self.editModeLabel = QLabel("ReadOnly")

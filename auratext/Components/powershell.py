@@ -2,8 +2,8 @@ import os
 import re
 import subprocess
 import platform
-
-
+import sys
+import json
 from PyQt6.QtCore import QProcess, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QKeyEvent, QTextCursor
 from PyQt6.QtWidgets import (
@@ -20,6 +20,15 @@ from auratext.scripts.def_path import resource
 newTerminalIcon = resource(r"../media/terminal/new.svg")
 killTerminalIcon = resource(r"../media/terminal/remove.svg")
 
+if platform.system() == "Windows":
+    local_app_data = os.getenv('LOCALAPPDATA')
+elif platform.system() == "Linux":
+    local_app_data = os.path.expanduser("~/.config")
+elif platform.system() == "Darwin":
+    local_app_data = os.path.expanduser("~/Library/Application Support")
+else:
+    print("Unsupported operating system")
+    sys.exit(1)
 
 class TerminalEmulator(QWidget):
     commandEntered = pyqtSignal(str)
@@ -31,14 +40,21 @@ class TerminalEmulator(QWidget):
 
         self.setup_toolbar()
 
+        with open(f"{local_app_data}/data/theme.json", "r") as themes_file:
+            self._themes = json.load(themes_file)
+
+        editor_bg = self._themes.get("editor_theme", "#121212")
+        fg_color = self._themes.get("editor_fg", "#ffffff")
+
+
         self.terminal = QPlainTextEdit(self)
         self.set_terminal_font()
         self.terminal.setStyleSheet(
-            """
-            QPlainTextEdit {
-                background-color: #1E1E1E;
-                color: white;
-            }
+            f"""
+            QPlainTextEdit {{
+                background-color: {editor_bg};
+                color: {fg_color};
+            }}
         """
         )
         self.terminal.keyPressEvent = self.terminal_key_press_event

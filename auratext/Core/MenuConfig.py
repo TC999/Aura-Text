@@ -6,6 +6,7 @@ import platform
 
 from PyQt6.QtWidgets import QMenu
 from PyQt6.QtGui import QAction, QIcon
+
 from .plugin_interface import MenuPluginInterface
 
 if platform.system() == "Windows":
@@ -18,7 +19,11 @@ else:
     print("Unsupported operating system")
     sys.exit(1)
 local_app_data = os.path.join(local_app_data, "AuraText")
-cpath = open(f"{local_app_data}/data/CPath_Project.txt", "r+").read()
+try:
+    with open(f"{local_app_data}/data/CPath_Project.txt", "r+") as _cpath_file:
+        cpath = _cpath_file.read().strip()
+except (FileNotFoundError, OSError):
+    cpath = ""
 
 with open(f"{local_app_data}/data/theme.json", "r") as themes_file:
     _themes = json.load(themes_file)
@@ -27,8 +32,8 @@ with open(f"{local_app_data}/data/theme.json", "r") as themes_file:
 # noinspection PyArgumentList
 def configure_menuBar(self):
     menubar = self.menuBar()
-
     self.setMenuBar(menubar)
+    
     self.setStyleSheet(
         f"""
 QMenuBar {{
@@ -56,35 +61,37 @@ QMenu::item::selected {{
 """
     )
 
+    menubar = self.menuBar()
+
+    self.setMenuBar(menubar)
+
     whats_this_action = QAction(self)
     whats_this_action.setShortcut("Shift+F1")
     menubar.addAction(whats_this_action)
     file_menu = QMenu("&File", self)
-    file_menu.addAction("New", self.cs_new_document).setWhatsThis("Create a New File")
+    file_menu.addAction("New", self.cs_new_document).setWhatsThis("Create a new document")
 
-    new_menu = QMenu("New(With Template)")
-    new_menu.addAction(".html", self.html_temp)
-    new_menu.addAction(".py", self.py_temp)
-    new_menu.addAction(".cpp", self.cpp_temp)
-    new_menu.addAction(".php", self.php_temp)
-    new_menu.addAction(".tex", self.tex_temp)
-    new_menu.addAction(".java", self.java_temp)
+    new_menu = QMenu("New Template")
+    new_menu.addAction("HTML", self.html_temp)
+    new_menu.addAction("Python", self.py_temp)
+    new_menu.addAction("C++", self.cpp_temp)
+    new_menu.addAction("PHP", self.php_temp)
+    new_menu.addAction("TeX", self.tex_temp)
+    new_menu.addAction("Java", self.java_temp)
 
-    file_menu.addAction("Open", self.open_document).setWhatsThis("Open an existing file")
+    file_menu.addAction("Open", self.open_document).setWhatsThis("Open an existing document")
     file_menu.addSeparator()
     file_menu.addAction("New Project", self.new_project).setWhatsThis("Create a new project")
-    file_menu.addAction("New Project from VCS", self.gitClone).setWhatsThis("Clone GIT repo")
+    file_menu.addAction("Clone Git Repository", self.gitClone).setWhatsThis("Clone a repository into a new project")
     file_menu.addAction("Open Project", self.open_project).setWhatsThis("Open an existing project")
-    file_menu.addAction("Open Project as Treeview", self.open_project_as_treeview).setWhatsThis(
-        "Open an existing project as a treeview dock"
-    )
+    file_menu.addAction("Open Project in Tree View", self.open_project_as_treeview).setWhatsThis("Open project directory in the tree view")
     file_menu.addAction("Manage Projects", self.manageProjects)
 
     git_menu = QMenu("&Git", self)
-    git_menu.addAction("Commit", self.gitCommit)
-    git_menu.addAction("Push", self.gitPush)
-    git_menu.addAction("Git Graph", self.gitGraph)
-    git_menu.addAction("Interactive Rebase", self.gitRebase)
+    git_menu.addAction("Commit", getattr(self, "gitCommit", lambda: None))
+    git_menu.addAction("Push", getattr(self, "gitPush", lambda: None))
+    git_menu.addAction("Graph", getattr(self, "gitGraph", lambda: None))
+    git_menu.addAction("Rebase", getattr(self, "gitRebase", lambda: None))
 
     def is_git_repo():
         if os.path.isdir(os.path.join(cpath, '.git')):
@@ -95,10 +102,11 @@ QMenu::item::selected {{
     file_menu.addMenu(new_menu)
     file_menu.addSeparator()
 
-    file_menu.addAction("Save As", self.save_document).setWhatsThis("Save the document")
+    file_menu.addAction("Save", self.save_document).setWhatsThis("Save the current document")
+    file_menu.addAction("Save As", self.save_document_as).setWhatsThis("Save the current document with a new name")
     file_menu.addSeparator()
-    file_menu.addAction("Summary", self.summary).setWhatsThis(
-        "Get basic info of a file (Eg: Number of lines)"
+    file_menu.addAction("Document Stats", self.summary).setWhatsThis(
+        "Show document statistics (lines, words, characters, bytes)"
     )
     file_menu.addSeparator()
     file_menu.addAction("Extensions", self.expandSidebar__Plugins)
@@ -131,6 +139,17 @@ QMenu::item::selected {{
     view_menu.addAction("Project Directory", self.expandSidebar__Explorer).setWhatsThis(
         "Shows the files and folder in your project as treeview"
     )
+    view_menu.addAction("Function Grid", self.function_grid).setWhatsThis(
+        "Open the Function Grid"
+    )
+
+    self.take_break_action = QAction("Zen Mode", self)
+    self.take_break_action.setCheckable(True)
+    self.take_break_action.setChecked(getattr(self, "take_break_mode_enabled", False))
+    self.take_break_action.triggered.connect(self.toggle_take_break_mode)
+    self.take_break_action.setWhatsThis("Hide menus and UI chrome for distraction-free writing")
+    view_menu.addAction(self.take_break_action)
+
     view_menu.addSeparator()
     #view_menu.addAction("AT Terminal", self.terminal_widget)
     #view_menu.addAction("Python Console", self.python_console)
@@ -488,6 +507,9 @@ QMenu::item::selected {{
         pass
 
     prefernces_menu.addMenu(language_menu)
+    prefernces_menu.addAction("Keyboard Bindings", self.keyboard_bindings).setWhatsThis(
+        "Open the keybindings JSON to customize keyboard shortcuts"
+    )
     prefernces_menu.addAction("Additional Preferences", self.additional_prefs)
     prefernces_menu.addAction("Import Theme", self.import_theme)
     menubar.addMenu(prefernces_menu)

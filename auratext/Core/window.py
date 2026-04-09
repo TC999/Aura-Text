@@ -6,23 +6,23 @@ import random
 import shutil
 import sys
 import sqlite3
-import time
 import webbrowser
 import subprocess
-import git
-import pyjokes
 import qdarktheme
-import markdown
 import platform
-from pyqtconsole.console import PythonConsole
-from PyQt6.QtCore import Qt, QSize, QTimer
+from PyQt6.QtCore import Qt, QSize, QTimer, QEvent
 from PyQt6.QtGui import QColor, QFont, QActionGroup, QFileSystemModel, QPixmap, QIcon, QShortcut, QKeySequence, QCursor
 from PyQt6.Qsci import QsciScintilla
 from PyQt6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QInputDialog,
     QDockWidget,
+    QLabel,
+    QLineEdit,
     QTextEdit,
+    QListWidget,
+    QListWidgetItem,
     QTreeView,
     QFileDialog,
     QSplashScreen,
@@ -30,6 +30,9 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QWidget,
+    QFormLayout,
+    QScrollArea,
+    QKeySequenceEdit,
     QVBoxLayout,
     QHBoxLayout,
     QStatusBar,
@@ -49,6 +52,7 @@ from ..Components import powershell, terminal, statusBar, ProjectManager, About,
 from ..Components.CommandPalette import CommandPalette
 from ..Components.NewProjectDialog import NewProjectDialog
 from ..Components.Linter import CodeLinter
+from ..Components.FunctionGrid import FunctionGridDialog
 from .MiniMapWidget import MiniMapWidget
 from .svg_icon_manager import SVGIconManager
 
@@ -69,44 +73,19 @@ else:
 local_app_data = os.path.join(local_app_data, "AuraText")
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-# Check dev path first: ../../LocalAppData/AuraText
-project_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
-copytolocalappdata = os.path.join(project_root, "LocalAppData", "AuraText")
 
-if not os.path.exists(copytolocalappdata):
-    import sys
-    exedir = os.path.dirname(sys.executable)
-    copytolocalappdata = os.path.join(exedir, "LocalAppData", "AuraText")
+try:
+    with open(f"{local_app_data}/data/CPath_Project.txt", "r+") as _cpath_file:
+        cpath = _cpath_file.read().strip()
+except (FileNotFoundError, OSError):
+    cpath = ""
 
-if os.path.exists(copytolocalappdata):
-    if not os.path.exists(local_app_data):
-        os.makedirs(local_app_data)
+try:
+    with open(f"{local_app_data}/data/CPath_File.txt", "r+") as _cfile_file:
+        cfile = _cfile_file.read().strip()
+except (FileNotFoundError, OSError):
+    cfile = ""
 
-    for item in os.listdir(copytolocalappdata):
-        s = os.path.join(copytolocalappdata, item)
-        d = os.path.join(local_app_data, item)
-
-        if item == "data":
-            if not os.path.exists(d):
-                os.makedirs(d)
-            for data_item in os.listdir(s):
-                ds = os.path.join(s, data_item)
-                dd = os.path.join(d, data_item)
-                if not os.path.exists(dd):
-                    if os.path.isdir(ds):
-                        shutil.copytree(ds, dd)
-                    else:
-                        shutil.copy2(ds, dd)
-        else:
-            if os.path.isdir(s):
-                shutil.copytree(s, d, dirs_exist_ok=True)
-            else:
-                shutil.copy2(s, d)
-else:
-    print(f"Warning: Could not find LocalAppData/AuraText to copy. Checked: {copytolocalappdata}")
-
-cpath = open(f"{local_app_data}/data/CPath_Project.txt", "r+").read().strip()
-cfile = open(f"{local_app_data}/data/CPath_File.txt", "r+").read().strip()
 if not cpath:
     cpath = ""
 if not cfile:
@@ -161,9 +140,28 @@ class Window(QMainWindow):
         with open(f"{local_app_data}/data/terminal_history.txt", "r+") as thfile:
             self.terminal_history = thfile.readlines()
 
-        # keymap file
-        with open(f"{local_app_data}/data/shortcuts.json", "r+") as kmfile:
+        self.keybindings_path = f"{local_app_data}/data/keybindings.json"
+        if not os.path.exists(self.keybindings_path):
+            fallback_keybindings = os.path.join(script_dir, "keybindings.json")
+            if os.path.exists(fallback_keybindings):
+                shutil.copyfile(fallback_keybindings, self.keybindings_path)
+
+        with open(self.keybindings_path, "r") as kmfile:
             self._shortcuts = json.load(kmfile)
+
+        if not isinstance(self._shortcuts, dict):
+            self._shortcuts = {}
+
+        self.keybinding_inputs = {}
+        self.keybindings_widget = None
+        self.qt_shortcuts = []
+        self.take_break_mode_enabled = False
+        self.take_break_state = {}
+        self.take_break_action = None
+        self.take_break_exit_button = None
+        self.take_break_hint_timer = None
+        self.take_break_image_label = None
+        self.take_break_image_pixmap = QPixmap()
 
         if self._themes["theming"] == "flat":
             # pywinstyles.apply_style(self, "dark")
@@ -178,8 +176,9 @@ class Window(QMainWindow):
 
         self._config["show_setup_info"] = "False"
 
+        self._startup_splash = None
+
         def splashScreen():
-            # Splash Screen
             splash_pix = ""
             current_time = datetime.datetime.now().time()
             sunrise_time = current_time.replace(hour=6, minute=0, second=0, microsecond=0)
@@ -195,8 +194,9 @@ class Window(QMainWindow):
 
             splash = QSplashScreen(splash_pix)
             splash.show()
-            time.sleep(1)
-            splash.hide()
+            splash.raise_()
+            QApplication.processEvents()
+            self._startup_splash = splash
 
         if self._config["splash"] == "True":
             splashScreen()
@@ -204,11 +204,7 @@ class Window(QMainWindow):
             pass
 
         self.tab_widget = TabWidget()
-        self.tab_widget.setStyleSheet("""
-            QTabBar::tab {
-                padding: 8px;
-            }
-        """)
+        self.apply_vscode_tab_style(self.tab_widget)
 
         # Create splitter for split view
         self.editor_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -217,6 +213,9 @@ class Window(QMainWindow):
         self.is_split = False
 
         self.current_editor = ""
+        self.dock = None
+        self.model = None
+        self.explorer_tree_view = None
 
         if self._config["explorer_default_open"] == "True":
             self.expandSidebar__Explorer()
@@ -226,8 +225,6 @@ class Window(QMainWindow):
         if cpath == "" or cpath == " ":
             welcome_widget = WelcomeScreen.WelcomeWidget(self)
             self.tab_widget.addTab(welcome_widget, "Welcome")
-        else:
-            self.treeview_project(cpath)
 
         self.tab_widget.setTabsClosable(True)
 
@@ -287,6 +284,31 @@ class Window(QMainWindow):
         )
         self.explorer_button.unselected_icon = explorer_unselected
         self.explorer_button.selected_icon = explorer_selected
+
+        # Create Search button with SVG icons
+        search_svg = f"{local_app_data}/icons/search.svg"
+        search_unselected, search_selected = SVGIconManager.create_stateful_icon(
+            search_svg, None, theme_color, (23, 23)
+        )
+
+        self.search_button = QPushButton(self)
+        self.search_button.setIcon(search_unselected)
+        self.search_button.setIconSize(QSize(23, 23))
+        self.search_button.setFixedSize(36, 36)
+        self.search_button.setStyleSheet(
+            """
+            QPushButton {
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+            """
+        )
+        self.search_button.unselected_icon = search_unselected
+        self.search_button.selected_icon = search_selected
+        self.search_button.setToolTip("Search in project")
 
         # Create Plugin/Extensions button with SVG icons
         extensions_svg = f"{local_app_data}/icons/extensions.svg"
@@ -348,7 +370,6 @@ class Window(QMainWindow):
             QPushButton {
                 border: none;
                 border-radius:10;
-                align: botton;
             }
             QPushButton:hover {
                 background-color: #4e5157;
@@ -357,10 +378,11 @@ class Window(QMainWindow):
         )
 
         self.sidebar_layout.insertWidget(0, self.explorer_button)
-        self.sidebar_layout.insertWidget(1, self.plugin_button)
+        self.sidebar_layout.insertWidget(1, self.search_button)
+        self.sidebar_layout.insertWidget(2, self.plugin_button)
 
         if self.is_git_repo():
-            self.sidebar_layout.insertWidget(2, self.commit_button)
+            self.sidebar_layout.insertWidget(3, self.commit_button)
         else:
             pass
 
@@ -370,6 +392,7 @@ class Window(QMainWindow):
 
         # Connect the button's clicked signal to the slot
         self.explorer_button.clicked.connect(lambda: self.handle_sidebar_button_click(self.explorer_button, self.expandSidebar__Explorer))
+        self.search_button.clicked.connect(lambda: self.handle_sidebar_button_click(self.search_button, self.expandSidebar__Search))
         self.plugin_button.clicked.connect(lambda: self.handle_sidebar_button_click(self.plugin_button, self.expandSidebar__Plugins))
 
         # Create Run button for Python files
@@ -437,15 +460,54 @@ class Window(QMainWindow):
         self.tab_widget.setCornerWidget(button_container, Qt.Corner.TopRightCorner)
 
         self.setCentralWidget(self.editor_splitter)
+        self.take_break_image_label = QLabel(self)
+        self.take_break_image_label.setVisible(False)
+        self.take_break_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.take_break_image_label.setStyleSheet("background-color: #000000;")
+        self.take_break_image_label.setMouseTracking(True)
+        self.take_break_image_label.installEventFilter(self)
+
+        zen_image_path = os.path.join(local_app_data, "icons", "zen.png")
+        if os.path.exists(zen_image_path):
+            self.take_break_image_pixmap = QPixmap(zen_image_path)
+
+        self.take_break_exit_button = QPushButton(self)
+        self.take_break_exit_button.setVisible(False)
+        self.take_break_exit_button.clicked.connect(self.toggle_take_break_mode)
+        self.take_break_exit_button.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(20, 20, 20, 220);
+                color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 70);
+                border-radius: 14px;
+                padding: 8px 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: rgba(35, 35, 35, 230);
+            }
+            """
+        )
+        self.take_break_hint_timer = QTimer(self)
+        self.take_break_hint_timer.setSingleShot(True)
+        self.take_break_hint_timer.timeout.connect(lambda: self.take_break_exit_button.hide())
+        self._update_take_break_exit_button_text()
+        self.installEventFilter(self)
+        self.editor_splitter.installEventFilter(self)
+        self.tab_widget.installEventFilter(self)
+        self.setMouseTracking(True)
+        self.editor_splitter.setMouseTracking(True)
+        self.tab_widget.setMouseTracking(True)
         self.statusBar.hide()
         self.editors = []
-        self.linters = {}  # Dictionary to store linters for each editor
-        self.tab_file_paths = {}  # Dictionary to store file paths for each tab index
+        self.linters = {}  
+        self.tab_file_paths = {}  
 
         self.about_dialog = None
 
         if self._config["open_last_file"] == "True":
-            if cfile != "" or cfile != " ":
+            if cfile and cfile.strip():
                 self.open_last_file()
                 self.statusBar.show()
             else:
@@ -456,7 +518,7 @@ class Window(QMainWindow):
         self.action_group = QActionGroup(self)
         self.action_group.setExclusive(True)
 
-        self.tab_widget.setStyleSheet("QTabWidget {border: 10px;}")
+        self.apply_vscode_tab_style(self.tab_widget)
 
         self.tab_widget.currentChanged.connect(self.change_text_editor)
         self.tab_widget.tabCloseRequested.connect(self.remove_editor)
@@ -465,7 +527,7 @@ class Window(QMainWindow):
         self.setWindowIcon(QIcon(f"{local_app_data}/icons/icon.ico"))
         self.configure_menuBar()
         sys.path.append(f"{local_app_data}/plugins")
-        self.load_plugins()
+        QTimer.singleShot(0, self.load_plugins)
 
         # Setup autosave timer (saves every 30 seconds)
         self.autosave_timer = QTimer(self)
@@ -486,7 +548,8 @@ class Window(QMainWindow):
             {"name": "File: Open Project", "action": self.open_project},
             {"name": "File: Open Project as Treeview", "action": self.open_project_as_treeview},
             {"name": "File: Manage Projects", "action": self.manageProjects},
-            {"name": "File: Save As", "action": self.save_document},
+            {"name": "File: Save", "action": self.save_document},
+            {"name": "File: Save As", "action": self.save_document_as},
             {"name": "File: Summary", "action": self.summary},
             {"name": "File: Extensions", "action": self.expandSidebar__Plugins},
             {"name": "File: Settings", "action": self.expandSidebar__Settings},
@@ -504,6 +567,7 @@ class Window(QMainWindow):
             {"name": "View: Powershell", "action": self.setupPowershell},
             {"name": "View: Python Console", "action": self.python_console},
             {"name": "View: Read-Only", "action": self.toggle_read_only},
+            {"name": "View: Zen Mode", "action": self.toggle_take_break_mode},
             {"name": "Code: Code Formatting", "action": self.code_formatting},
             {"name": "Code: Boilerplates", "action": self.boilerplates},
             {"name": "Code: Create Snippet", "action": self.create_snippet},
@@ -515,8 +579,9 @@ class Window(QMainWindow):
             {"name": "Git: Commit", "action": self.gitCommit},
             {"name": "Git: Push", "action": self.gitPush},
             {"name": "Git: Graph", "action": self.gitGraph},
-            {"name": "Git: Interactive Rebase", "action": self.gitRebase},
+            {"name": "Git: Interactive Rebase", "action": getattr(self, "gitRebase", lambda: None)},
             {"name": "Preferences: Additional Preferences", "action": self.additional_prefs},
+            {"name": "Preferences: Keyboard Bindings", "action": self.keyboard_bindings},
             {"name": "Preferences: Import Theme", "action": self.import_theme},
             {"name": "Help: Keyboard Shortcuts", "action": self.shortcuts},
             {"name": "Help: Getting Started", "action": self.getting_started},
@@ -532,79 +597,364 @@ class Window(QMainWindow):
         self.statusBar.setLanguageClickHandler(self.show_language_menu)
         self.command_palette.hide()
         
-        # Keyboard shortcuts
-        # Command palette
-        shortcut = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
-        shortcut.activated.connect(self.show_command_palette)
-        
-        # File operations
-        new_file_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
-        new_file_shortcut.activated.connect(self.cs_new_document)
-        
-        open_file_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
-        open_file_shortcut.activated.connect(self.open_document)
-        
-        save_file_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
-        save_file_shortcut.activated.connect(self.save_document)
-        
-        close_tab_shortcut = QShortcut(QKeySequence("Ctrl+W"), self)
-        close_tab_shortcut.activated.connect(lambda: self.remove_editor(self.tab_widget.currentIndex()) if self.tab_widget.currentIndex() >= 0 else None)
-        
-        # Edit operations
-        undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
-        undo_shortcut.activated.connect(self.undo_document)
-        
-        redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
-        redo_shortcut.activated.connect(self.redo_document)
-        
-        cut_shortcut = QShortcut(QKeySequence("Ctrl+X"), self)
-        cut_shortcut.activated.connect(self.cut_document)
-        
-        copy_shortcut = QShortcut(QKeySequence("Ctrl+C"), self)
-        copy_shortcut.activated.connect(self.copy_document)
-        
-        paste_shortcut = QShortcut(QKeySequence("Ctrl+V"), self)
-        paste_shortcut.activated.connect(self.paste_document)
-        
-        select_all_shortcut = QShortcut(QKeySequence("Ctrl+A"), self)
-        select_all_shortcut.activated.connect(lambda: self.current_editor.selectAll() if self.current_editor and self.current_editor != "" else None)
-        
-        # View operations
-        terminal_shortcut = QShortcut(QKeySequence("Ctrl+`"), self)
-        terminal_shortcut.activated.connect(self.setupPowershell)
-        
-        split_shortcut = QShortcut(QKeySequence("Ctrl+\\"), self)
-        split_shortcut.activated.connect(self.toggle_split_editor)
-        
-        fullscreen_shortcut = QShortcut(QKeySequence("F11"), self)
-        fullscreen_shortcut.activated.connect(self.fullscreen)
-        
-        # Code operations
-        run_shortcut = QShortcut(QKeySequence("Shift+F5"), self)
-        run_shortcut.activated.connect(self.run_python_file)
-        
-        find_shortcut = QShortcut(QKeySequence("Ctrl+F"), self)
-        find_shortcut.activated.connect(self.find_in_editor)
-        
-        format_shortcut = QShortcut(QKeySequence("Shift+Alt+F"), self)
-        format_shortcut.activated.connect(self.code_formatting)
-        
-        settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
-        settings_shortcut.activated.connect(self.expandSidebar__Settings)
+        self.setup_keyboard_shortcuts()
 
-        self.showMaximized()
+        self.show()
+        QTimer.singleShot(0, self._apply_startup_window_state)
+        if self._startup_splash is not None:
+            self._startup_splash.finish(self)
+            self._startup_splash = None
+
+    def _apply_startup_window_state(self):
+        if not self.isFullScreen():
+            self.showMaximized()
+
+    def _set_take_break_action_checked(self, checked):
+        if self.take_break_action is None:
+            return
+        self.take_break_action.blockSignals(True)
+        self.take_break_action.setChecked(checked)
+        self.take_break_action.blockSignals(False)
+
+    def _get_take_break_shortcut_text(self):
+        return self._shortcuts.get("take_break_mode", "Ctrl+.")
+
+    def _update_take_break_exit_button_text(self):
+        if self.take_break_exit_button is None:
+            return
+        shortcut = self._get_take_break_shortcut_text()
+        if shortcut:
+            self.take_break_exit_button.setText(f"Exit Zen Mode ({shortcut})")
+        else:
+            self.take_break_exit_button.setText("Exit Zen Mode")
+        self.take_break_exit_button.adjustSize()
+        self._position_take_break_exit_button()
+
+    def _position_take_break_exit_button(self):
+        if self.take_break_exit_button is None:
+            return
+        x = max(8, (self.width() - self.take_break_exit_button.width()) // 2)
+        self.take_break_exit_button.move(x, 12)
+
+    def _show_take_break_exit_hint(self):
+        if not self.take_break_mode_enabled or self.take_break_exit_button is None:
+            return
+        self._update_take_break_exit_button_text()
+        self.take_break_exit_button.raise_()
+        self.take_break_exit_button.show()
+        self.take_break_hint_timer.start(1800)
+
+    def _update_take_break_image(self):
+        if self.take_break_image_label is None:
+            return
+
+        self.take_break_image_label.setGeometry(self.rect())
+        if self.take_break_image_pixmap.isNull():
+            return
+
+        scaled = self.take_break_image_pixmap.scaled(
+            self.take_break_image_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.take_break_image_label.setPixmap(scaled)
+
+    def eventFilter(self, obj, event):
+        if self.take_break_mode_enabled and event.type() == QEvent.Type.MouseMove:
+            self._show_take_break_exit_hint()
+        return super().eventFilter(obj, event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_take_break_image()
+        self._position_take_break_exit_button()
+
+    def toggle_take_break_mode(self, _checked=None):
+        if not self.take_break_mode_enabled:
+            corner_widget = self.tab_widget.cornerWidget(Qt.Corner.TopRightCorner)
+            visible_docks = [dock for dock in self.findChildren(QDockWidget) if dock.isVisible()]
+
+            self.take_break_state = {
+                "window_mode": "fullscreen" if self.isFullScreen() else ("maximized" if self.isMaximized() else "normal"),
+                "menu_visible": self.menuBar().isVisible(),
+                "status_visible": self.statusBar.isVisible(),
+                "tabbar_visible": self.tab_widget.tabBar().isVisible(),
+                "corner_visible": corner_widget.isVisible() if corner_widget else None,
+                "visible_docks": visible_docks,
+            }
+
+            for dock in visible_docks:
+                dock.hide()
+
+            self.menuBar().hide()
+            self.statusBar.hide()
+            self.tab_widget.tabBar().hide()
+            if corner_widget:
+                corner_widget.hide()
+
+            if self.take_break_image_label is not None:
+                self._update_take_break_image()
+                self.take_break_image_label.show()
+                self.take_break_image_label.raise_()
+
+            if not self.isFullScreen():
+                self.showFullScreen()
+
+            self.take_break_mode_enabled = True
+            self._set_take_break_action_checked(True)
+            self.take_break_exit_button.hide()
+            self.take_break_exit_button.raise_()
+            return
+
+        corner_widget = self.tab_widget.cornerWidget(Qt.Corner.TopRightCorner)
+        state = self.take_break_state if isinstance(self.take_break_state, dict) else {}
+
+        if state.get("menu_visible", True):
+            self.menuBar().show()
+        else:
+            self.menuBar().hide()
+
+        if state.get("status_visible", False):
+            self.statusBar.show()
+        else:
+            self.statusBar.hide()
+
+        if state.get("tabbar_visible", True):
+            self.tab_widget.tabBar().show()
+        else:
+            self.tab_widget.tabBar().hide()
+
+        if corner_widget and state.get("corner_visible") is not None:
+            corner_widget.setVisible(state.get("corner_visible", True))
+
+        for dock in state.get("visible_docks", []):
+            if dock is not None:
+                dock.show()
+
+        window_mode = state.get("window_mode", "maximized")
+        if window_mode == "fullscreen":
+            self.showFullScreen()
+        elif window_mode == "normal":
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+        self.take_break_mode_enabled = False
+        self.take_break_state = {}
+        self._set_take_break_action_checked(False)
+        if self.take_break_hint_timer is not None:
+            self.take_break_hint_timer.stop()
+        if self.take_break_image_label is not None:
+            self.take_break_image_label.hide()
+        if self.take_break_exit_button is not None:
+            self.take_break_exit_button.hide()
 
     def show_command_palette(self):
         self.command_palette.exec()
 
+    def apply_vscode_tab_style(self, target_tab_widget):
+        target_tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: 0;
+                background: #1e1e1e;
+            }
+
+            QTabBar::tab {
+                background: #2d2d2d;
+                color: #cccccc;
+                border: none;
+                min-height: 20px;
+                min-width: 90px;
+                padding: 6px 12px;
+                margin-right: 1px;
+            }
+
+            QTabBar::tab:selected {
+                background: #1e1e1e;
+                color: #ffffff;
+                border-top: 2px solid #007acc;
+            }
+
+            QTabBar::tab:hover:!selected {
+                background: #373737;
+            }
+
+            QTabBar::close-button {
+                subcontrol-position: right;
+                margin-right: 6px;
+                width: 12px;
+                height: 12px;
+                border-radius: 2px;
+                background: transparent;
+            }
+
+            QTabBar::close-button:hover {
+                background: #4a4a4a;
+            }
+        """)
+
+    def get_default_keybindings(self):
+        return {
+            "command_palette": "Ctrl+Shift+P",
+            "function_grid": "Ctrl+Shift+W",
+            "new_file": "Ctrl+N",
+            "open_file": "Ctrl+O",
+            "save_file": "Ctrl+S",
+            "close_tab": "Ctrl+W",
+            "undo": "Ctrl+Z",
+            "redo": "Ctrl+Y",
+            "cut": "Ctrl+X",
+            "copy": "Ctrl+C",
+            "paste": "Ctrl+V",
+            "select_all": "Ctrl+A",
+            "terminal": "Ctrl+`",
+            "split_editor": "Ctrl+\\",
+            "fullscreen": "F11",
+            "run_python_file": "Shift+F5",
+            "find": "Ctrl+F",
+            "project_search": "Ctrl+Shift+F",
+            "format_code": "Shift+Alt+F",
+            "settings": "Ctrl+,",
+            "take_break_mode": "Ctrl+."
+        }
+
+    def get_keybinding_items(self):
+        return [
+            ("command_palette", "Command Palette"),
+            ("function_grid", "Function Grid"),
+            ("new_file", "New File"),
+            ("open_file", "Open File"),
+            ("save_file", "Save File"),
+            ("close_tab", "Close Tab"),
+            ("undo", "Undo"),
+            ("redo", "Redo"),
+            ("cut", "Cut"),
+            ("copy", "Copy"),
+            ("paste", "Paste"),
+            ("select_all", "Select All"),
+            ("terminal", "Open Powershell"),
+            ("split_editor", "Toggle Split Editor"),
+            ("fullscreen", "Toggle Fullscreen"),
+            ("run_python_file", "Run Python File"),
+            ("find", "Find in File"),
+            ("project_search", "Search in Project"),
+            ("format_code", "Format Code"),
+            ("settings", "Open Settings"),
+            ("take_break_mode", "Toggle Zen Mode")
+        ]
+
+    def setup_keyboard_shortcuts(self):
+        for shortcut in self.qt_shortcuts:
+            shortcut.setEnabled(False)
+            shortcut.deleteLater()
+        self.qt_shortcuts = []
+
+        bindings = self.get_default_keybindings()
+        bindings.update(self._shortcuts)
+        self._shortcuts = bindings
+
+        def register(binding_key, handler):
+            sequence = self._shortcuts.get(binding_key, "")
+            if not sequence:
+                return
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.activated.connect(handler)
+            self.qt_shortcuts.append(shortcut)
+
+        register("command_palette", self.show_command_palette)
+        register("function_grid", self.function_grid)
+        register("new_file", self.cs_new_document)
+        register("open_file", self.open_document)
+        register("save_file", self.save_document)
+        register("close_tab", lambda: self.remove_editor(self.tab_widget.currentIndex()) if self.tab_widget.currentIndex() >= 0 else None)
+        register("undo", self.undo_document)
+        register("redo", self.redo_document)
+        register("cut", self.cut_document)
+        register("copy", self.copy_document)
+        register("paste", self.paste_document)
+        register("select_all", lambda: self.current_editor.selectAll() if self.current_editor and self.current_editor != "" else None)
+        register("terminal", self.setupPowershell)
+        register("split_editor", self.toggle_split_editor)
+        register("fullscreen", self.fullscreen)
+        register("run_python_file", self.run_python_file)
+        register("find", self.find_in_editor)
+        register("project_search", self.expandSidebar__Search)
+        register("format_code", self.code_formatting)
+        register("take_break_mode", self.toggle_take_break_mode)
+        register("settings", self.expandSidebar__Settings)
+        self._update_take_break_exit_button_text()
+
+    def save_keybindings(self):
+        updated = {}
+        for key, editor in self.keybinding_inputs.items():
+            sequence = editor.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+            updated[key] = sequence
+
+        self._shortcuts = updated
+
+        with open(self.keybindings_path, "w") as file_handle:
+            json.dump(self._shortcuts, file_handle, indent=2)
+
+        self.setup_keyboard_shortcuts()
+        QMessageBox.information(self, "Keyboard Bindings", "Keybindings updated.")
+
+    def reset_keybindings_fields(self):
+        defaults = self.get_default_keybindings()
+        for key, editor in self.keybinding_inputs.items():
+            editor.setKeySequence(QKeySequence(defaults.get(key, "")))
+
+    def keyboard_bindings(self):
+        for i in range(self.tab_widget.count()):
+            if self.tab_widget.tabText(i) == "Keyboard Bindings":
+                self.tab_widget.setCurrentIndex(i)
+                return
+
+        self.keybindings_widget = QWidget()
+        outer_layout = QVBoxLayout(self.keybindings_widget)
+
+        title = QLabel("Press a shortcut in each box to assign it")
+        outer_layout.addWidget(title)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_content = QWidget()
+        form_layout = QFormLayout(scroll_content)
+
+        self.keybinding_inputs = {}
+        for key, label in self.get_keybinding_items():
+            sequence_editor = QKeySequenceEdit()
+            sequence_editor.setKeySequence(QKeySequence(self._shortcuts.get(key, "")))
+            self.keybinding_inputs[key] = sequence_editor
+            form_layout.addRow(label, sequence_editor)
+
+        scroll_area.setWidget(scroll_content)
+        outer_layout.addWidget(scroll_area)
+
+        button_row = QHBoxLayout()
+        reset_button = QPushButton("Reset Defaults")
+        save_button = QPushButton("Save")
+        open_json_button = QPushButton("Open JSON")
+
+        reset_button.clicked.connect(self.reset_keybindings_fields)
+        save_button.clicked.connect(self.save_keybindings)
+        open_json_button.clicked.connect(lambda: self.open_file_from_path(self.keybindings_path))
+
+        button_row.addWidget(reset_button)
+        button_row.addWidget(open_json_button)
+        button_row.addWidget(save_button)
+        outer_layout.addLayout(button_row)
+
+        settings_icon = QIcon(f"{self.local_app_data}/icons/settings.png")
+        self.tab_widget.addTab(self.keybindings_widget, settings_icon, "Keyboard Bindings")
+        self.tab_widget.setCurrentWidget(self.keybindings_widget)
+        self.statusBar.show()
+
     def create_editor(self, file_path=""):
-        # Create container widget for editor + minimap
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        # Create editor
         self.text_editor = CodeEditor(self)
         
         # Create minimap
@@ -686,15 +1036,17 @@ class Window(QMainWindow):
 
     def load_plugins(self):
         self.plugins = []
+        plugin_dir = f"{local_app_data}/plugins"
+        if not os.path.isdir(plugin_dir):
+            return
+
         plugin_files = [
-            f.split(".")[0] for f in os.listdir(f"{local_app_data}/plugins") if f.endswith(".py")
+            f.split(".")[0] for f in os.listdir(plugin_dir) if f.endswith(".py")
         ]
-        print("Plugins Found: ", plugin_files)
-        sys.path.append(f"{local_app_data}/plugins")
+        if plugin_dir not in sys.path:
+            sys.path.append(plugin_dir)
         for plugin_file in plugin_files:
-            print(f"Loading plugin: {plugin_file}")
             if not plugin_file.isidentifier():
-                print(f"Skipping plugin with invalid name: {plugin_file}")
                 continue
             try:
                 module = importlib.import_module(plugin_file)
@@ -702,10 +1054,10 @@ class Window(QMainWindow):
                     if isinstance(obj, type) and issubclass(obj, Plugin) and obj is not Plugin:
                         try:
                             self.plugins.append(obj(self))
-                        except Exception as e:
-                            print(f"Error initializing plugin {plugin_file}: {e}")
-            except Exception as e:
-                print(f"Error loading plugin {plugin_file}: {e}")
+                        except Exception:
+                            continue
+            except Exception:
+                continue
 
     def onPluginDockVisibilityChanged(self, visible):
         if visible:
@@ -731,32 +1083,19 @@ class Window(QMainWindow):
             if hasattr(self.commit_button, 'unselected_icon'):
                 self.commit_button.setIcon(self.commit_button.unselected_icon)
 
+    def onSearchDockVisibilityChanged(self, visible):
+        if visible:
+            if hasattr(self.search_button, 'selected_icon'):
+                self.search_button.setIcon(self.search_button.selected_icon)
+            self.selected_sidebar_button = self.search_button
+        else:
+            if hasattr(self.search_button, 'unselected_icon'):
+                self.search_button.setIcon(self.search_button.unselected_icon)
+            if self.selected_sidebar_button == self.search_button:
+                self.selected_sidebar_button = None
+
     def treeview_project(self, path):
-        self.dock = QDockWidget("Explorer", self)
-        self.dock.visibilityChanged.connect(
-            lambda visible: self.onExplorerDockVisibilityChanged(visible)
-        )
-        # dock.setStyleSheet("QDockWidget { background-color: #191a1b; color: white;}")
-        self.dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
-        tree_view = QTreeView()
-        self.model = QFileSystemModel()
-        bg = self._themes["sidebar_bg"]
-        tree_view.setStyleSheet(
-            f"QTreeView {{background-color: {bg}; color: white; border: none; }}"
-        )
-        tree_view.setModel(self.model)
-        tree_view.setRootIndex(self.model.index(path))
-        self.model.setRootPath(path)
-        self.dock.setWidget(tree_view)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
-
-        tree_view.setFont(QFont("Consolas"))
-
-        tree_view.setColumnHidden(1, True)  # File type column
-        tree_view.setColumnHidden(2, True)  # Size column
-        tree_view.setColumnHidden(3, True)  # Date modified column
-
-        tree_view.doubleClicked.connect(self.open_file)
+        self.expandSidebar__Explorer(path)
     
     def handle_sidebar_button_click(self, button, action):
         """Handle sidebar button clicks and update icon states"""
@@ -772,33 +1111,174 @@ class Window(QMainWindow):
         # Execute the original action
         action()
 
-    def expandSidebar__Explorer(self):
-        self.dock = QDockWidget("Explorer", self)
-        self.dock.setMinimumWidth(200)
-        self.dock.visibilityChanged.connect(
-            lambda visible: self.onExplorerDockVisibilityChanged(visible)
+    def expandSidebar__Explorer(self, project_path=None):
+        root_path = (project_path if project_path is not None else cpath).strip()
+        if not root_path:
+            return
+
+        if not self.dock:
+            self.dock = QDockWidget("Explorer", self)
+            self.dock.setMinimumWidth(200)
+            self.dock.visibilityChanged.connect(
+                lambda visible: self.onExplorerDockVisibilityChanged(visible)
+            )
+            self.dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+
+            self.explorer_tree_view = QTreeView()
+            self.model = QFileSystemModel()
+            bg = self._themes["sidebar_bg"]
+            self.explorer_tree_view.setStyleSheet(
+                f"QTreeView {{background-color: {bg}; color: white; border: none; }}"
+            )
+            self.explorer_tree_view.setModel(self.model)
+            self.dock.setWidget(self.explorer_tree_view)
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
+
+            self.explorer_tree_view.setFont(QFont("Consolas"))
+            self.explorer_tree_view.setColumnHidden(1, True)  # File type column
+            self.explorer_tree_view.setColumnHidden(2, True)  # Size column
+            self.explorer_tree_view.setColumnHidden(3, True)  # Date modified column
+            self.explorer_tree_view.doubleClicked.connect(self.open_file)
+
+        self.model.setRootPath(root_path)
+        self.explorer_tree_view.setRootIndex(self.model.index(root_path))
+        self.dock.show()
+        self.dock.raise_()
+
+    def expandSidebar__Search(self):
+        if hasattr(self, 'search_dock') and self.search_dock:
+            self.search_dock.show()
+            self.search_dock.raise_()
+            if hasattr(self, 'project_search_input') and self.project_search_input:
+                self.project_search_input.setFocus()
+            return
+
+        self.search_dock = QDockWidget("Search", self)
+        self.search_dock.setMinimumWidth(320)
+        self.search_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        self.search_dock.visibilityChanged.connect(
+            lambda visible: self.onSearchDockVisibilityChanged(visible)
         )
-        self.dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
-        tree_view = QTreeView()
 
-        self.model = QFileSystemModel()
-        bg = self._themes["sidebar_bg"]
-        tree_view.setStyleSheet(
-            f"QTreeView {{background-color: {bg}; color: white; border: none; }}"
-        )
-        tree_view.setModel(self.model)
-        tree_view.setRootIndex(self.model.index(cpath))
-        self.model.setRootPath(cpath)
-        self.dock.setWidget(tree_view)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
+        search_container = QWidget(self.search_dock)
+        search_layout = QVBoxLayout(search_container)
+        search_layout.setContentsMargins(8, 8, 8, 8)
+        search_layout.setSpacing(8)
 
-        tree_view.setFont(QFont("Consolas"))
+        top_row = QHBoxLayout()
+        self.project_search_input = QLineEdit(search_container)
+        self.project_search_input.setPlaceholderText("Search in project...")
+        self.project_search_input.returnPressed.connect(self.perform_project_search)
 
-        tree_view.setColumnHidden(1, True)  # File type column
-        tree_view.setColumnHidden(2, True)  # Size column
-        tree_view.setColumnHidden(3, True)  # Date modified column
+        search_button = QPushButton("Search", search_container)
+        search_button.clicked.connect(self.perform_project_search)
 
-        tree_view.doubleClicked.connect(self.open_file)
+        top_row.addWidget(self.project_search_input)
+        top_row.addWidget(search_button)
+
+        self.project_search_info_label = QLabel("Enter a query and press Enter.", search_container)
+        self.project_search_results = QListWidget(search_container)
+        self.project_search_results.itemDoubleClicked.connect(self.open_project_search_result)
+        self.project_search_results.itemActivated.connect(self.open_project_search_result)
+
+        search_layout.addLayout(top_row)
+        search_layout.addWidget(self.project_search_info_label)
+        search_layout.addWidget(self.project_search_results)
+
+        self.search_dock.setWidget(search_container)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.search_dock)
+        self.search_dock.show()
+        self.search_dock.raise_()
+        self.project_search_input.setFocus()
+
+    def perform_project_search(self):
+        if not hasattr(self, 'project_search_results'):
+            return
+
+        query = self.project_search_input.text().strip()
+        self.project_search_results.clear()
+
+        if not query:
+            self.project_search_info_label.setText("Enter a query and press Enter.")
+            return
+
+        project_root = cpath if cpath and os.path.isdir(cpath) else ""
+        if not project_root:
+            self.project_search_info_label.setText("No project folder is open.")
+            return
+
+        excluded_dirs = {
+            ".git",
+            "__pycache__",
+            ".venv",
+            "venv",
+            "node_modules",
+            "build",
+            "dist",
+        }
+        max_file_size_bytes = 1024 * 1024
+        max_results = 500
+
+        query_lower = query.lower()
+        result_count = 0
+        reached_limit = False
+
+        for root, dirs, files in os.walk(project_root):
+            dirs[:] = [d for d in dirs if d not in excluded_dirs]
+
+            for filename in files:
+                file_path = os.path.join(root, filename)
+
+                try:
+                    if os.path.getsize(file_path) > max_file_size_bytes:
+                        continue
+                except OSError:
+                    continue
+
+                try:
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as file_handle:
+                        for line_number, line in enumerate(file_handle, start=1):
+                            if query_lower in line.lower():
+                                relative_path = os.path.relpath(file_path, project_root)
+                                preview = " ".join(line.strip().split())
+                                if len(preview) > 160:
+                                    preview = preview[:157] + "..."
+
+                                item = QListWidgetItem(f"{relative_path}:{line_number}  {preview}")
+                                item.setData(Qt.ItemDataRole.UserRole, (file_path, line_number))
+                                self.project_search_results.addItem(item)
+                                result_count += 1
+
+                                if result_count >= max_results:
+                                    reached_limit = True
+                                    break
+                except (UnicodeDecodeError, PermissionError, OSError):
+                    continue
+
+                if reached_limit:
+                    break
+
+            if reached_limit:
+                break
+
+        if result_count == 0:
+            self.project_search_info_label.setText(f"No results for '{query}'.")
+        elif reached_limit:
+            self.project_search_info_label.setText(f"Showing first {result_count} results for '{query}'.")
+        else:
+            self.project_search_info_label.setText(f"{result_count} result(s) for '{query}'.")
+
+    def open_project_search_result(self, item):
+        result_data = item.data(Qt.ItemDataRole.UserRole)
+        if not result_data:
+            return
+
+        file_path, line_number = result_data
+        self.open_file_from_path(file_path)
+
+        if self.current_editor and hasattr(self.current_editor, "setCursorPosition"):
+            self.current_editor.setCursorPosition(max(line_number - 1, 0), 0)
+            self.current_editor.setFocus()
 
     def create_snippet(self):
         ModuleFile.CodeSnippets.snippets_gen(self.current_editor)
@@ -888,6 +1368,8 @@ class Window(QMainWindow):
             self.addProjectsToDB(name=project_name, project_path=project_path)
 
     def code_jokes(self):
+        import pyjokes
+
         a = pyjokes.get_joke(language="en", category="neutral")
         QMessageBox.information(self, "A Byte of Humour!", a)
 
@@ -908,6 +1390,8 @@ class Window(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.ps_dock)
 
     def python_console(self):
+        from pyqtconsole.console import PythonConsole
+
         self.console_dock = QDockWidget("Python Console", self)
         console_widget = PythonConsole()
         console_widget.eval_in_thread()
@@ -943,7 +1427,7 @@ class Window(QMainWindow):
         messagebox = QMessageBox()
         global path
         try:
-            from git import Repo
+            from git import Repo, GitCommandError
 
             repo_url, ok = QInputDialog.getText(self, "Git Repo", "URL of the Repository")
             try:
@@ -963,7 +1447,7 @@ class Window(QMainWindow):
                 )
                 messagebox.exec()
                 self.treeview_project(path)
-            except git.GitCommandError:
+            except GitCommandError:
                 pass
 
         except ImportError:
@@ -1077,11 +1561,7 @@ class Window(QMainWindow):
             
             # Create split tab widget
             self.split_tab_widget = TabWidget()
-            self.split_tab_widget.setStyleSheet("""
-                QTabBar::tab {
-                    padding: 8px;
-                }
-            """)
+            self.apply_vscode_tab_style(self.split_tab_widget)
             self.split_tab_widget.setTabsClosable(True)
             
             # Create a new editor container with same content
@@ -1180,7 +1660,7 @@ class Window(QMainWindow):
         self.gitPushDialog.exec()
 
     def gitGraph(self):
-        self.git_graph_widget = GitGraph(cpath)
+        self.git_graph_widget = GitGraph.GitGraph(cpath)
         self.git_graph_widget.show()
 
     def gitRebase(self):
@@ -1191,9 +1671,21 @@ class Window(QMainWindow):
         return os.path.isdir(os.path.join(cpath, '.git'))
 
     def open_file(self, index):
+        if not self.model:
+            return
         path = self.model.filePath(index)
+        self.open_file_from_path(path)
+
+    def open_file_from_path(self, path):
         image_extensions = ["png", "jpg", "jpeg", "ico", "gif", "bmp"]
         ext = path.split(".")[-1]
+
+        if ext.lower() == "pdf":
+            if self.open_pdf_in_app(path):
+                pdf_handler = getattr(self, "_latex_pdf_open_handler", None)
+                if callable(pdf_handler):
+                    pdf_handler(path)
+                return
 
         if ext.lower() == "db":
             self.db_viewer = DBViewer(path)
@@ -1230,6 +1722,111 @@ class Window(QMainWindow):
             )
             messagebox.exec()
 
+    def open_pdf_in_app(self, path):
+        try:
+            from PyQt6.QtPdf import QPdfDocument
+            from PyQt6.QtPdfWidgets import QPdfView
+        except Exception:
+            messagebox = QMessageBox()
+            messagebox.setWindowTitle("PDF Viewer Unavailable")
+            messagebox.setText("Qt PDF backend is not available in this build.")
+            messagebox.exec()
+            return False
+
+        existing_tab_index = -1
+        for tab_index, file_path in self.tab_file_paths.items():
+            if os.path.normcase(file_path) == os.path.normcase(path):
+                existing_tab_index = tab_index
+                break
+        if existing_tab_index >= 0:
+            self.tab_widget.setCurrentIndex(existing_tab_index)
+            return True
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        controls = QHBoxLayout()
+
+        doc = QPdfDocument(container)
+        viewer = QPdfView(container)
+        viewer.setDocument(doc)
+        viewer.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        pdf_vertical_mode = True
+        if hasattr(QPdfView, "PageMode") and hasattr(viewer, "setPageMode"):
+            viewer.setPageMode(QPdfView.PageMode.MultiPage)
+
+        zoom_out_btn = QPushButton("Zoom-")
+        zoom_in_btn = QPushButton("Zoom+")
+        prev_btn = QPushButton("Prev")
+        next_btn = QPushButton("Next")
+        mode_btn = QPushButton("Sideways View")
+        page_label = QLabel("Page 1")
+
+        def update_page_label():
+            navigator = viewer.pageNavigator()
+            total = doc.pageCount()
+            if total <= 0:
+                page_label.setText("Page 0/0")
+                return
+            page_label.setText(f"Page {navigator.currentPage() + 1}/{total}")
+
+        def jump_page(delta):
+            navigator = viewer.pageNavigator()
+            total = doc.pageCount()
+            if total <= 0:
+                return
+            current = navigator.currentPage()
+            new_page = max(0, min(total - 1, current + delta))
+            if new_page != current:
+                navigator.jump(new_page, navigator.currentLocation(), navigator.currentZoom())
+            update_page_label()
+
+        zoom_out_btn.clicked.connect(
+            lambda: viewer.setZoomFactor(max(0.25, viewer.zoomFactor() - 0.1))
+        )
+        zoom_in_btn.clicked.connect(
+            lambda: viewer.setZoomFactor(min(4.0, viewer.zoomFactor() + 0.1))
+        )
+        prev_btn.clicked.connect(lambda: jump_page(-1))
+        next_btn.clicked.connect(lambda: jump_page(1))
+
+        def toggle_view_mode():
+            nonlocal pdf_vertical_mode
+            if not (hasattr(QPdfView, "PageMode") and hasattr(viewer, "setPageMode")):
+                return
+            if pdf_vertical_mode:
+                viewer.setPageMode(QPdfView.PageMode.SinglePage)
+                mode_btn.setText("Vertical View")
+            else:
+                viewer.setPageMode(QPdfView.PageMode.MultiPage)
+                mode_btn.setText("Sideways View")
+            pdf_vertical_mode = not pdf_vertical_mode
+
+        mode_btn.clicked.connect(toggle_view_mode)
+
+        controls.addWidget(prev_btn)
+        controls.addWidget(next_btn)
+        controls.addWidget(zoom_out_btn)
+        controls.addWidget(zoom_in_btn)
+        controls.addWidget(mode_btn)
+        controls.addWidget(page_label)
+        controls.addStretch(1)
+
+        layout.addLayout(controls)
+        layout.addWidget(viewer)
+
+        doc.load(path)
+        update_page_label()
+
+        # keep references alive with the tab container
+        container._pdf_doc = doc
+        container._pdf_viewer = viewer
+
+        self.tab_widget.addTab(container, os.path.basename(path))
+        tab_index = self.tab_widget.indexOf(container)
+        self.tab_file_paths[tab_index] = path
+        self.tab_widget.setCurrentWidget(container)
+        return True
+
     def configure_menuBar(self):
         MenuConfig.configure_menuBar(self)
 
@@ -1252,6 +1849,10 @@ class Window(QMainWindow):
         if hasattr(self, 'dock') and self.dock:
             self.removeDockWidget(self.dock)
             self.dock.close()
+            self.dock.deleteLater()
+            self.dock = None
+            self.model = None
+            self.explorer_tree_view = None
         
         # Clear current project path
         with open(f"{self.local_app_data}/data/CPath_Project.txt", "w") as file:
@@ -1655,6 +2256,8 @@ class Window(QMainWindow):
         dialog.exec()
 
     def toHTML(self):
+        import markdown
+
         index = self.tab_widget.currentIndex()
         tabText = str(self.tab_widget.tabText(index))
         print(tabText)
@@ -1699,7 +2302,8 @@ class Window(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, shortcut_dock)
 
     def find_in_editor(self):
-        self.current_editor.show_search_dialog()
+        if self.current_editor and self.current_editor != "" and hasattr(self.current_editor, "show_search_dialog"):
+            self.current_editor.show_search_dialog()
 
     def open_project(self):
         dialog = QFileDialog(self)
@@ -1716,7 +2320,7 @@ class Window(QMainWindow):
             )
             if is_git_repo():
                 self.commit_button.hide()
-                self.sidebar_layout.insertWidget(2, self.commit_button)
+                self.sidebar_layout.insertWidget(3, self.commit_button)
                 self.commit_button.show()
             else:
                 self.commit_button.hide()
@@ -1913,12 +2517,27 @@ class Window(QMainWindow):
         self.current_editor.copy()
 
     def summary(self):
-        lines = str(self.current_editor.lines())
         text = self.current_editor.text()
-        text = "Number of Lines: " + lines
-        messagebox = QMessageBox()
-        messagebox.setText(text), messagebox.setWindowTitle("Summary")
-        messagebox.exec()
+        lines = text.count('\n') + 1 if text else 0
+        words = len(text.split())
+        chars_with_spaces = len(text)
+        chars_no_spaces = len(text.replace(' ', '').replace('\n', '').replace('\r', ''))
+        try:
+            bytes_count = len(text.encode('utf-8'))
+        except Exception:
+            bytes_count = chars_with_spaces
+
+        summary = (
+            f"Lines: {lines}\n"
+            f"Words: {words}\n"
+            f"Characters (with spaces): {chars_with_spaces}\n"
+            f"Characters (no spaces): {chars_no_spaces}\n"
+            f"Bytes: {bytes_count}"
+        )
+        msg = QMessageBox()
+        msg.setWindowTitle("Document Statistics")
+        msg.setText(summary)
+        msg.exec()
 
     def paste_document(self):
         self.current_editor.paste()
@@ -1976,6 +2595,9 @@ class Window(QMainWindow):
     def save_document(self):
         ModuleFile.save_document(self)
 
+    def save_document_as(self):
+        ModuleFile.save_document(self, force_dialog=True)
+
     @staticmethod
     def about_github():
         webbrowser.open_new_tab("https://github.com/rohankishore/Aura-Notes")
@@ -2003,6 +2625,25 @@ class Window(QMainWindow):
         else:
             self.showMaximized()
 
+    def function_grid(self):
+        actions = {
+            "open_project": self.open_project,
+            "settings": self.expandSidebar__Settings,
+            "todo": self.todo,
+            "additional_prefs": self.additional_prefs,
+            "keyboard_bindings": self.keyboard_bindings,
+            "extensions": self.open_extensions_panel,
+            "themes": self.open_themes_panel,
+            "performance_monitor": self.show_performance,
+            "notes": self.notes,
+            "manage_projects": self.manageProjects,
+            "open_project_tree": self.open_project_as_treeview,
+            "command_palette": self.show_command_palette,
+        }
+
+        function_grid_dialog = FunctionGridDialog(self, actions=actions)
+        function_grid_dialog.exec()
+
     def show_command_palette(self):
         self.command_palette.show()
         # Center the palette
@@ -2023,6 +2664,16 @@ class Window(QMainWindow):
         self.performance_dock.setWidget(self.performance_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.performance_dock)
         self.performance_dock.show()
+
+    def open_extensions_panel(self):
+        self.expandSidebar__Plugins()
+        if hasattr(self, 'plugin_dock') and self.plugin_dock:
+            self.plugin_dock.raise_()
+
+    def open_themes_panel(self):
+        self.expandSidebar__Plugins()
+        if hasattr(self, 'theme_dock') and self.theme_dock:
+            self.theme_dock.raise_()
 
     def get_icon(self, title):
         extension = os.path.splitext(title)[1].lower()
